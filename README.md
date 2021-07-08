@@ -1,0 +1,2 @@
+# Accord
+Discord/Danbooru bot
