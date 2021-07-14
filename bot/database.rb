@@ -1,21 +1,22 @@
 require "aws-sdk-dynamodb"
 
+require_relative "server"
+
 ##
 # AWS/DynamoDB helper methods
 class Database
   class DatabaseError < RuntimeError
   end
 
-  ##
-  # Get the schema's table name
   # @return [String]
   def table_name
+    # noinspection RubyYardReturnMatch
     @@table_def[:table_name]
   end
 
-  ##
   # @param [Aws::DynamoDB::Client] db The AWS DynamoDB client instance to use
   def initialize(db)
+    # @type [Aws::DynamoDB::Client]
     @db = db
   end
 
@@ -43,18 +44,40 @@ class Database
 
   ##
   # Get a list of all stored servers
-  # @returns [Array<String>]
+  # @returns [Array<Server>]
   def servers
-    @db.scan({
+    res = @db.scan({
       table_name: table_name,
-      filter_expression: "#filter_key = :key_value",
+      filter_expression: "#filter_key = :val1 OR #filter_key = :val2 OR #filter_key = :val3",
       expression_attribute_names: {
         "#filter_key" => "key"
       },
       expression_attribute_values: {
-        ":key_value" => "channels"
+        ":val1" => "control_roles",
+        ":val2" => "control_channels",
+        ":val3" => "channels"
       }
-    }).to_h[:items].map { |res| res["server"] } # Only retrieve the server key
+    }).to_h[:items]
+
+    # Extract all server info to a tree structure
+    mapping = Hash.new { |hash, key| hash[key] = {}}
+    res.each do |server|
+      id = server["server"]
+      case server["key"]
+        when "control_roles"
+          mapping[id][:control_roles] = server["roles"]
+        when "channels"
+          mapping[id][:channels] = server["channels"]
+        else
+          raise "Unexpected values #{server["key"]} encountered"
+      end
+    end
+
+    # @type id [String]
+    # @type desc [Hash]
+    mapping.map do |id, desc|
+      Server.new(id: id, roles: desc[:control_roles], channels: desc[:channels])
+    end
   end
 
   ##
@@ -67,14 +90,6 @@ class Database
     servers.each do |server|
       # Prepare to delete the 3 control rows
       req = [
-        {
-          delete_request: {
-            key: {
-              "server" => server,
-              "key"    => "control_channels"
-            }
-          }
-        },
         {
           delete_request: {
             key: {
@@ -102,7 +117,7 @@ class Database
           "server" => server,
           "key"    => "channels"
         }
-      }).to_h[:item]["values"].each do |channel|
+      }).to_h[:item]["channels"].each do |channel|
         requests << {
           delete_request: {
             key: {
@@ -138,15 +153,6 @@ class Database
         {
           put_request: {
             item: {
-              "server"     => server,
-              "key"        => "control_channels",
-              "channel_id" => []
-            }
-          }
-        },
-        {
-          put_request: {
-            item: {
               "server" => server,
               "key"    => "control_roles",
               "roles"  => []
@@ -156,9 +162,9 @@ class Database
         {
           put_request: {
             item: {
-              "server" => server,
-              "key"    => "channels",
-              "values" => []
+              "server"   => server,
+              "key"      => "channels",
+              "channels" => []
             }
           }
         }
@@ -185,7 +191,6 @@ class Database
   # Partition by server
   #
   # Every server has:
-  # * `control_channels`, where the bot responds to commands
   # * `control_roles`, which roles the bot responds to (bot always responds to server owner)
   # * `channels`, list of channels the bot should post in
   #

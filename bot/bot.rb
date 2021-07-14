@@ -32,7 +32,7 @@ accord = Accord.new(token: ENV["DISCORD_TOKEN"], prefix: "a!", db: db, logger: l
 trap("INT") do
   puts "Caught interrupt, shutting down"
   accord.stop
-  exit
+  exit(0)
 end
 
 accord.run
