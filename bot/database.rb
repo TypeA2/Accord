@@ -74,11 +74,108 @@ class Database
     end
 
     # @type id [String]
-    # @type desc [Hash]
+    # @type desc [Hash{Symbol => Array<String>}]
     mapping.map do |id, desc|
-      Server.new(id: id, roles: desc[:control_roles], channels: desc[:channels])
+      Server.new(id: id, roles: desc[:control_roles], channels: channels(id, desc[:channels]))
     end
   end
+
+  ##
+  # Get all channel data by ID
+  # @param [String] server The server ID the channels belong to
+  # @param [Array<String>] ids
+  # @returns [Array<Server::Channel>]
+  def channels(server, ids)
+    return [] if ids.empty?
+
+    res = @db.batch_get_item({
+      request_items: {
+        table_name => {
+          keys: ids.map do |channel|
+            {
+              "server" => server,
+              "key"    => channel
+            }
+          end,
+          projection_expression: "#key,channel",
+          expression_attribute_names: {
+            "#key" => "key"
+          }
+        }
+      }
+    })
+
+    res.to_h[:responses][table_name].map do |obj|
+      Server::Channel.new(id: obj["key"], tags: obj["channel"]["tags"], latest: obj["channel"]["latest"].to_i)
+    end
+  end
+
+  ##
+  # Register and add a channel
+  # @param [Server] server
+  # @param [Server::Channel] channel
+  # @return [nil, Hash]
+  def add_channel(server, channel)
+    response = @db.batch_write_item({
+      request_items: {
+        table_name => [
+          {
+            put_request: {
+              item: {
+                "server"   => server.id,
+                "key"      => "channels",
+                "channels" => server.channels.map { |c| c.id } << channel.id
+              }
+            }
+          },
+          {
+            put_request: {
+              item: {
+                "server"  => server.id,
+                "key"     => channel.id,
+                "channel" => channel.db_h
+              }
+            }
+          }
+        ]
+      }
+    })
+
+    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+  end
+
+  # Remove a channel
+  # @param [Server] server
+  # @param [Server::Channel] channel
+  # @return [nil, Hash]
+  def delete_channel(server, channel)
+    response = @db.batch_write_item({
+      request_items: {
+        table_name => [
+          {
+            delete_request: {
+              key: {
+                "server" => server.id,
+                "key"    => channel.id
+              }
+            }
+          },
+          {
+            put_request: {
+              item: {
+                "server"   => server.id,
+                "key"      => "channels",
+                "channels" => server.channels.select { |c| c.id unless c.id == channel.id }
+              }
+            }
+          }
+        ]
+      }
+    })
+
+    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+  end
+
 
   ##
   # Deletes the specified servers
@@ -185,6 +282,23 @@ class Database
 
     # Count the number of unprocessed items
     responses.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : responses
+  end
+
+  ##
+  # Update the roles parameter server-side
+  #
+  # @param [Server] server
+  def set_roles(server)
+    req = {
+      item: {
+        "server" => server.id,
+        "key"    => "control_roles",
+        "roles"  => server.roles
+      },
+      table_name: table_name
+    }
+
+    @db.put_item(req)
   end
 
   private
