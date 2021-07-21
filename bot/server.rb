@@ -32,6 +32,11 @@ class Server
     def to_s
       "<Channel id=#{@id} latest=#{@latest} tags=#{@tags}>"
     end
+
+    # @return [String] compact Discord-ready description of this channel
+    def describe
+      "<##{@id}> [#{@latest}] => `#{@tags.join(" ")}`"
+    end
   end
   # @return [String] The server's unique ID
   attr_reader :id
@@ -54,6 +59,13 @@ class Server
     @roles = roles
     @channels = channels
     @server = server
+  end
+
+  # Refresh this server's channels
+  def refresh
+    @channels.each do |ch|
+      $stderr.puts ch.id
+    end
   end
 
   # Whether the user has bot permissions in this server

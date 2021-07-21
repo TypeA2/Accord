@@ -24,6 +24,13 @@ class Accord
     # @type [Thread]
     @timer
 
+    # @type [Thread]
+    @recording_thread
+
+    # All servers in which to refresh
+    # @type [Array<String>]
+    @refresh = []
+
     # Automatically create table in debug mode, require manual creation in release mode
     if @db.table_exists?
       @logger.info("Table found, proceeding")
@@ -55,6 +62,8 @@ class Accord
     @accord.command(:record2, { min_args: 3, max_args: 13 }, &method(:record2))
     @accord.command(:recordings, { max_args: 0 }, &method(:recordings))
     @accord.command(:remove, { min_args: 1, max_args: 1 }, &method(:remove))
+    @accord.command(:refresh, { max_args: 0 }, &method(:refresh))
+    @accord.command(:describe, { max_args: 1 }, &method(:describe))
 
     @accord.ready(&method(:ready))
   end
@@ -99,6 +108,44 @@ class Accord
     end
 
     @logger.debug("Stopping branch thread")
+  end
+
+  def recording_updater
+    loop do
+      # @type [Server] server
+      @servers.each do |id, server|
+        @logger.info("Refreshing #{server.server.name} (#{id})")
+        server.refresh
+      end
+
+      start = Time.now
+      wake = start + 3600
+      while Time.now < wake
+        sleep_now = [3600, wake - Time.now].min
+
+        @logger.debug("Sleeping for #{sleep_now} seconds until #{wake}")
+
+        sleep(sleep_now)
+
+        break unless @running
+
+        # Refresh posts if there's a manual refresh
+        unless @refresh.empty?
+          # @type [String] id
+          @refresh.each do |id|
+            @logger.info("Refreshing #{@servers[id].server.name} (#{id})")
+            @servers[id].refresh
+          end
+
+          @refresh.clear
+          next
+        end
+
+        break unless @running
+      end
+    end
+
+    @logger.debug("Stopping recording thread")
   end
 
   public
@@ -182,9 +229,7 @@ class Accord
     # @type c [Server::Channel]
     # @type found [Server::Channel]
     if (found = server.channels.find { |c| c.id == channel.id.to_s })
-      return "Channel already registered: \n" \
-             " - Tags: `#{found.tags.join(" ")}`\n" \
-             " - Last post: `#{found.latest}`"
+      return "Channel already registered: #{found.describe}"
     end
 
     # Remove inline code delimiters
@@ -243,10 +288,45 @@ class Accord
 
     response = "#{server.channels.size} recordings:\n"
     server.channels.each do |channel|
-      response += " - <##{channel.id}> [#{channel.latest}] => `#{channel.tags.join(" ")}`\n"
+      response += " - #{channel.describe}\n"
     end
 
     response
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  # @param [String, Discordrb::Channel] channel
+  def describe(event, channel = event.channel)
+    # @type [Server]
+    server = @servers[event.server.id.to_s]
+    return "No permissions" unless server.allowed?(event.author)
+
+    if channel.class == String
+      # Channel argument given, parse
+      channel = @accord.parse_mention(channel)
+      return "Channel not found" if channel == nil
+    end
+    # Else current channel
+
+
+    # @type [Server::Channel] found
+    if (found = server.channels.find { |ch| ch.id == channel.id.to_s })
+      "Recording: #{found.describe}"
+    else
+      "No recording for #{(event.channel.id == channel.id) ? "this channel" : "<##{channel.id}>"}."
+    end
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  def refresh(event)
+    # @type [Server]
+    server = @servers[event.server.id.to_s]
+    return "No permissions" unless server.allowed?(event.author)
+
+    @refresh << server.id
+    @recording_thread.run
+
+    "Refreshing recordings now"
   end
 
   # First-time setup stuff
@@ -290,6 +370,8 @@ class Accord
       raise "Failed to add all new servers"
     end
 
+    @recording_thread = Thread.new(&method(:recording_updater))
+
     @logger.info("Current servers:")
     @servers.each { |_, s| @logger.info("  #{s.server.name}: #{s}") }
   end
@@ -314,6 +396,13 @@ class Accord
     @timer.run if @timer.alive?
     @timer.join
 
+    @recording_thread.run if @recording_thread.alive?
+    @recording_thread.join
+
     @accord.join
+  end
+
+  def to_s
+    "<Accord servers=#{@servers}>"
   end
 end
