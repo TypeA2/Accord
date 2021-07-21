@@ -1,19 +1,35 @@
 require "logger/colors"
 require "discordrb"
 
+require_relative "danbooru"
+
 class Accord
+  # @return [Logger] Global logger instance
+  def self.logger
+    @logger ||= Logger.new(STDERR)
+  end
+
+  # @return [Logger] Global logger instance
+  def logger
+    Accord.logger
+  end
+
+  # @return [Database] Global database instance
+  def self.db
+    db ||= Database.new(Aws::DynamoDB::Client.new)
+  end
+
+  # @return [Database] Global database instance
+  def db
+    Accord.db
+  end
+
   # @param [String] token Discord token for the bot
   # @param [String] prefix Command prefix
-  # @param [Database] db Databse instance to use
-  # @param [Logger] logger Logger instance to use
-  def initialize(token:, prefix:, db:, logger: Logger.new(STDERR))
-
-    # @type [Database]
-    @db = db
-
-    # @type [Logger]
-    @logger = logger
-
+  # @param [Danbooru::User] user Danbooru user to connect to the API with
+  def initialize(token:, prefix:, user:)
+    # @type [Danbooru::User]
+    @user = user
     # @type [Boolean]
     @running = false
 
@@ -32,15 +48,15 @@ class Accord
     @refresh = []
 
     # Automatically create table in debug mode, require manual creation in release mode
-    if @db.table_exists?
-      @logger.info("Table found, proceeding")
+    if db.table_exists?
+      logger.info("Table found, proceeding")
     else
       if ENV["DEBUG"]
-        @logger.warn("Creating new table")
+        logger.warn("Creating new table")
 
-        @db.create_table
+        db.create_table
       else
-        @logger.fatal("Expected database does not exist, create it and run again")
+        logger.fatal("Expected database does not exist, create it and run again")
         exit
       end
     end
@@ -72,8 +88,8 @@ class Accord
   # @param [Discordrb::Events::ServerCreateEvent] event
   def server_create(event)
     server = event.server
-    if (responses = @db.add_servers([server.id]))
-      @logger.error("Failed to join server with id #{server.id} (\"#{server.name}\")")
+    if (responses = db.add_servers([server.id]))
+      logger.error("Failed to join server with id #{server.id} (\"#{server.name}\")")
     else
       @servers[server.id.to_s] = Server.new(id: server.id.to_s, roles: [], channels: [], server: server)
     end
@@ -101,29 +117,30 @@ class Accord
         @micro = 1
       end
 
-      @logger.debug("Moved to EID_#{@major}#{@minor}#{@micro}0")
+      logger.debug("Moved to EID_#{@major}#{@minor}#{@micro}0")
       break unless @running
 
       sleep(rand(25...95))
     end
 
-    @logger.debug("Stopping branch thread")
+    logger.debug("Stopping branch thread")
   end
 
   def recording_updater
     loop do
-      # @type [Server] server
-      @servers.each do |id, server|
-        @logger.info("Refreshing #{server.server.name} (#{id})")
-        server.refresh
-      end
-
       start = Time.now
       wake = start + 3600
-      while Time.now < wake
-        sleep_now = [3600, wake - Time.now].min
 
-        @logger.debug("Sleeping for #{sleep_now} seconds until #{wake}")
+      # @type [Server] server
+      @servers.each do |id, server|
+        logger.info("Refreshing #{server.server.name} (#{id})")
+        changed = server.refresh(@user)
+      end
+
+      while Time.now < wake
+        sleep_now = [3600, wake - Time.now].min.clamp(0..)
+
+        logger.debug("Sleeping for #{sleep_now} seconds until #{wake}")
 
         sleep(sleep_now)
 
@@ -133,8 +150,8 @@ class Accord
         unless @refresh.empty?
           # @type [String] id
           @refresh.each do |id|
-            @logger.info("Refreshing #{@servers[id].server.name} (#{id})")
-            @servers[id].refresh
+            logger.info("Refreshing #{@servers[id].server.name} (#{id})")
+            changed = @servers[id].refresh(@user)
           end
 
           @refresh.clear
@@ -145,7 +162,7 @@ class Accord
       end
     end
 
-    @logger.debug("Stopping recording thread")
+    logger.debug("Stopping recording thread")
   end
 
   public
@@ -173,11 +190,11 @@ class Accord
       return
     end
 
-    @logger.info("Adding role @#{role.name} (#{role.id})")
+    logger.info("Adding role @#{role.name} (#{role.id})")
 
     server.roles << role_id
 
-    @db.set_roles(server)
+    db.set_roles(server)
 
     event.send_message("Role <@&#{role.id}> added", false, nil, nil, { parse: [] })
   end
@@ -235,14 +252,14 @@ class Accord
     # Remove inline code delimiters
     tags = tags.map { |t| t.gsub("`", "") }
 
-    @logger.info(
+    logger.info(
       "Recording channel #{channel.name} with tags `#{tags.join(" ")}`, starting at post #{start}")
 
-    this_channel = Server::Channel.new(id: channel.id.to_s, tags: tags, latest: start)
+    this_channel = Server::Channel.new(id: channel.id.to_s, tags: tags, latest: start, channel: channel)
 
-    if (responses = @db.add_channel(server, this_channel))
-      @logger.warn("Failed to add channel #{this_channel.id} to server #{server.id}")
-      @logger.warn(responses)
+    if (responses = db.add_channel(server, this_channel))
+      logger.warn("Failed to add channel #{this_channel.id} to server #{server.id}")
+      logger.warn(responses)
       return "Recording error."
     end
 
@@ -267,15 +284,17 @@ class Accord
     found = server.channels.find { |c| c.id == channel.id.to_s }
     return "Recording not present" unless found
 
-    if (responses = @db.delete_channel(server, found))
-      @logger.warn("Failed to delete channel #{found.id} of server #{server.id}")
-      @logger.warn(responses)
+    if (responses = db.delete_channel(server, found))
+      logger.warn("Failed to delete channel #{found.id} of server #{server.id}")
+      logger.warn(responses)
       return "Removal error."
     end
 
     server.channels.delete(found)
 
-    "Removal of recording for <##{found.id}> ([#{found.latest}] => `#{found.tags.join(" ")}` complete"
+    logger.info("Removed #{found.describe}")
+
+    "Removal of recording for #{found.describe} complete"
   end
 
   # @param [Discordrb::CommandEvent] event
@@ -286,7 +305,7 @@ class Accord
 
     return "No recordings" if server.channels.empty?
 
-    response = "#{server.channels.size} recordings:\n"
+    response = "#{server.channels.size} recording#{server.channels.size == 1 ? "" : "s"}:\n"
     server.channels.each do |channel|
       response += " - #{channel.describe}\n"
     end
@@ -330,21 +349,24 @@ class Accord
   end
 
   # First-time setup stuff
-  # @param [Discordrb::ReadyEvent] event
-  def ready(event)
+  def ready(_)
     @running = true
 
-    @servers = @db.servers.to_h { |s| [s.id, s] }
+    server_mapping = db.servers
 
     # Servers the bot is in but not stored
     servers_to_add = []
     @accord.servers.each do |id, server|
-      if !@servers.key?(id.to_s)
+      if !server_mapping.key?(id.to_s)
         servers_to_add << id.to_s
         @servers[id.to_s] = Server.new(id: id.to_s, roles: [], channels: [], server: server)
       else
-        # Server already in database, attach instance
-        @servers[id.to_s].server = server
+        # Server already in database
+        # @type [Hash{Symbol => Array<String>}]
+        data = server_mapping[id.to_s]
+
+        @servers[id.to_s] = Server.new(id: id.to_s, roles: data[:control_roles],
+          channels: db.channels(server, data[:channels]), server: server)
       end
 
     end
@@ -357,23 +379,23 @@ class Accord
       end
     end
 
-    @logger.debug("Storing #{servers_to_add} and removing #{servers_to_remove}")
+    logger.debug("Storing #{servers_to_add} and removing #{servers_to_remove}")
 
-    if (responses = @db.delete_servers(servers_to_remove))
-      @logger.error("Not all servers were deleted: #{responses}")
+    if (responses = db.delete_servers(servers_to_remove))
+      logger.error("Not all servers were deleted: #{responses}")
       raise "Failed to delete all servers"
     end
 
-    if (responses = @db.add_servers(servers_to_add))
+    if (responses = db.add_servers(servers_to_add))
       # Not all servers were added
-      @logger.error("Not all servers were added: #{responses}")
+      logger.error("Not all servers were added: #{responses}")
       raise "Failed to add all new servers"
     end
 
     @recording_thread = Thread.new(&method(:recording_updater))
 
-    @logger.info("Current servers:")
-    @servers.each { |_, s| @logger.info("  #{s.server.name}: #{s}") }
+    logger.info("Current servers:")
+    @servers.each { |_, s| logger.info("  #{s.server.name}: #{s}") }
   end
 
   ##

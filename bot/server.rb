@@ -11,13 +11,18 @@ class Server
     # @return [Integer] Last post ID in this channel
     attr_reader :latest
 
+    # @return [Discordrb::Channel] Channel instance this object belongs to
+    attr_reader :channel
+
     # @param [String] id
     # @param [Array<String>] tags
     # @param [Integer] latest
-    def initialize(id:, tags:, latest:)
+    # @param [Discordrb::Channel] channel
+    def initialize(id:, tags:, latest:, channel:)
       @id = id
       @tags = tags
       @latest = latest
+      @channel = channel
     end
 
     # The database object, aka the tags and latest post
@@ -37,6 +42,11 @@ class Server
     def describe
       "<##{@id}> [#{@latest}] => `#{@tags.join(" ")}`"
     end
+
+    # @return [Array<String>] All tags used to describe this channel
+    def prepare_tags
+      @tags.clone << "id:>#{@latest}"
+    end
   end
   # @return [String] The server's unique ID
   attr_reader :id
@@ -48,13 +58,13 @@ class Server
   attr_reader :channels
 
   # @return [Discordrb::Server] Server instance
-  attr_accessor :server
+  attr_reader :server
 
   # @param [String] id Server ID
   # @param [Array<String>] roles IDs of roles to listen to
   # @param [Array<Channel>] channels objects to post in
   # @param [Discordrb::Server] server Server instance
-  def initialize(id:, roles: [], channels: [], server: nil)
+  def initialize(id:, roles:, channels:, server:)
     @id = id
     @roles = roles
     @channels = channels
@@ -62,10 +72,38 @@ class Server
   end
 
   # Refresh this server's channels
-  def refresh
+  # @param [Danbooru::User] user
+  # @return [Array<Channel>] Channels to update in the database
+  def refresh(user)
+    changed = []
     @channels.each do |ch|
-      $stderr.puts ch.id
+      count = Danbooru.post_count(user, ch.prepare_tags)
+
+      Accord.logger.debug("Got #{count} post#{count == 1 ? "" : "s"} for tags #{ch.prepare_tags.join("+")}")
+      if count > 0
+        pages = (count / Danbooru::PAGE_SIZE).ceil
+
+        # @type [Array<Danbooru::Post>]
+        posts = []
+
+        (1..pages).each do |i|
+          posts += Danbooru.posts(user, i, ch.prepare_tags)
+        end
+
+        new_max = posts.map { |p| p.id }.max
+
+        #Accord.logger.debug posts
+        Accord.logger.debug ch.channel
+        Accord.logger.debug posts.size
+        Accord.logger.debug "Last: #{new_max}"
+
+        ch.latest = new_max
+
+        changed << ch
+      end
     end
+
+    changed
   end
 
   # Whether the user has bot permissions in this server

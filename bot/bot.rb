@@ -12,10 +12,8 @@ OptionParser.new do |opts|
   end
 end.parse!
 
-logger = Logger.new(STDERR)
-
 if debug
-  logger.info("Running in DEBUG mode")
+  Accord.logger.info("Running in DEBUG mode")
   ENV["DEBUG"] = "true"
 
   # Use local database
@@ -24,9 +22,8 @@ if debug
   )
 end
 
-aws = Aws::DynamoDB::Client.new
-db = Database.new(aws)
-accord = Accord.new(token: ENV["DISCORD_TOKEN"], prefix: "a!", db: db, logger: logger)
+user = Danbooru::User.new(login: ENV["DANBOORU_USERNAME"], key: ENV["DANBOORU_API_KEY"])
+accord = Accord.new(token: ENV["DISCORD_TOKEN"], prefix: "a!", user: user)
 
 # Handle SIGINT for shutdown
 trap("INT") do

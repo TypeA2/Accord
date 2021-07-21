@@ -5,6 +5,9 @@ require_relative "server"
 ##
 # AWS/DynamoDB helper methods
 class Database
+  BACKOFF_SEQUENCE = [ 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 ]
+  MAX_RETRIES = 10
+
   class DatabaseError < RuntimeError
   end
 
@@ -44,7 +47,7 @@ class Database
 
   ##
   # Get a list of all stored servers
-  # @returns [Array<Server>]
+  # @returns [Array<Hash>]
   def servers
     res = @db.scan({
       table_name: table_name,
@@ -73,42 +76,71 @@ class Database
       end
     end
 
-    # @type id [String]
-    # @type desc [Hash{Symbol => Array<String>}]
-    mapping.map do |id, desc|
-      Server.new(id: id, roles: desc[:control_roles], channels: channels(id, desc[:channels]))
-    end
+    mapping
   end
 
   ##
   # Get all channel data by ID
-  # @param [String] server The server ID the channels belong to
+  # @param [Discordrb::Server] server The server ID the channels belong to
   # @param [Array<String>] ids
   # @returns [Array<Server::Channel>]
   def channels(server, ids)
     return [] if ids.empty?
 
-    res = @db.batch_get_item({
-      request_items: {
+    # @type [Array<Server::Channels>]
+    res = []
+
+    # Consume 100 items at a time
+    ids.each_slice(100) do |slice|
+      retries = 0
+
+      # Build request here first
+      request = {
         table_name => {
-          keys: ids.map do |channel|
+          keys: slice.map do |channel|
             {
-              "server" => server,
+              "server" => server.id.to_s,
               "key"    => channel
             }
           end,
-          projection_expression: "#key,channel",
+          projection_expression:      "#key,channel",
           expression_attribute_names: {
             "#key" => "key"
           }
         }
       }
-    })
 
-    res.to_h[:responses][table_name].map do |obj|
-      Server::Channel.new(id: obj["key"], tags: obj["channel"]["tags"], latest: obj["channel"]["latest"].to_i)
+      # Retry until all requests are satisfied
+      until request.empty?
+        response = @db.batch_get_item({
+          request_items: request
+        })
+
+        if response.responses.key?(table_name)
+          response.responses[table_name].each do |obj|
+            res << Server::Channel.new(
+              id:      obj["key"],
+              tags:    obj["channel"]["tags"],
+              latest:  obj["channel"]["latest"].to_i,
+              channel: server.channels.find { |ch| ch.id.to_s == obj["key"] })
+            success << obj["key"]
+          end
+
+          request = response.unprocessed_keys
+        end
+
+        unless request.empty?
+          raise "AWS error after #{MAX_RETRIES} retries" if retries == MAX_RETRIES
+
+          # Exponential-ish backoff
+          sleep BACKOFF_SEQUENCE[retries]
+
+          retries += 1
+        end
+      end
     end
   end
+
 
   ##
   # Register and add a channel
@@ -144,6 +176,29 @@ class Database
     response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
   end
 
+  # Update channel data
+  # @param [String] server
+  # @param [Array<Server::Channel>] channels
+  def update_channels(server, channels)
+    response = @db.batch_write_item({
+      request_items: {
+        table_name => channels.map do |ch|
+          {
+            put_request: {
+              item: {
+                "server"  => server,
+                "key"     => ch.id,
+                "channel" => ch.db_h
+              }
+            }
+          }
+        end
+      }
+    })
+
+    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+  end
+
   # Remove a channel
   # @param [Server] server
   # @param [Server::Channel] channel
@@ -165,7 +220,7 @@ class Database
               item: {
                 "server"   => server.id,
                 "key"      => "channels",
-                "channels" => server.channels.select { |c| c.id unless c.id == channel.id }
+                "channels" => server.channels.select { |c| c.id != channel.id }.map { |c| c.id }
               }
             }
           }
