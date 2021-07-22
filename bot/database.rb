@@ -11,6 +11,48 @@ class Database
   class DatabaseError < RuntimeError
   end
 
+  # Automatic exponential backoff
+  # @param [Symbol] method
+  # @param [Hash, Array] request
+  def backoff(method, request)
+    retries = 0
+    request = {
+      table_name => request
+    }
+
+    until request.empty?
+      response = @db.method(method).call({
+        request_items: request
+      })
+
+      if response.members.include?(:responses)
+        if response.responses.key?(table_name)
+          # Read request
+          response.responses[table_name].each do |obj|
+            yield obj if block_given?
+          end
+
+          request = response.unprocessed_keys
+        end
+
+      else
+        # Write request
+        request = response.unprocessed_items
+      end
+
+      unless request.empty?
+        Accord.logger.debug("Retrying request, got: #{request} #{response}")
+
+        raise "AWS error for #{method} after #{MAX_RETRIES} retries" if retries == MAX_RETRIES
+
+        # Exponential-ish backoff
+        sleep BACKOFF_SEQUENCE[retries]
+
+        retries += 1
+      end
+    end
+  end
+
   # @return [String]
   def table_name
     # noinspection RubyYardReturnMatch
@@ -85,104 +127,69 @@ class Database
   # @param [Array<String>] ids
   # @returns [Array<Server::Channel>]
   def channels(server, ids)
-    return [] if ids.empty?
-
     # @type [Array<Server::Channels>]
     res = []
 
     # Consume 100 items at a time
     ids.each_slice(100) do |slice|
-      retries = 0
-
-      # Build request here first
       request = {
-        table_name => {
-          keys: slice.map do |channel|
-            {
-              "server" => server.id.to_s,
-              "key"    => channel
-            }
-          end,
-          projection_expression:      "#key,channel",
-          expression_attribute_names: {
-            "#key" => "key"
+        keys: slice.map do |channel|
+          {
+            "server" => server.id.to_s,
+            "key"    => channel
           }
+        end,
+        projection_expression:      "#key,channel",
+        expression_attribute_names: {
+          "#key" => "key"
         }
       }
 
-      # Retry until all requests are satisfied
-      until request.empty?
-        response = @db.batch_get_item({
-          request_items: request
-        })
-
-        if response.responses.key?(table_name)
-          response.responses[table_name].each do |obj|
-            res << Server::Channel.new(
-              id:      obj["key"],
-              tags:    obj["channel"]["tags"],
-              latest:  obj["channel"]["latest"].to_i,
-              channel: server.channels.find { |ch| ch.id.to_s == obj["key"] })
-            success << obj["key"]
-          end
-
-          request = response.unprocessed_keys
-        end
-
-        unless request.empty?
-          raise "AWS error after #{MAX_RETRIES} retries" if retries == MAX_RETRIES
-
-          # Exponential-ish backoff
-          sleep BACKOFF_SEQUENCE[retries]
-
-          retries += 1
-        end
+      backoff(:batch_get_item, request) do |obj|
+        res << Server::Channel.new(
+          id:      obj["key"],
+          tags:    obj["channel"]["tags"],
+          latest:  obj["channel"]["latest"].to_i,
+          channel: server.channels.find { |ch| ch.id.to_s == obj["key"] })
       end
     end
-  end
 
+    res
+  end
 
   ##
   # Register and add a channel
   # @param [Server] server
   # @param [Server::Channel] channel
-  # @return [nil, Hash]
   def add_channel(server, channel)
-    response = @db.batch_write_item({
-      request_items: {
-        table_name => [
-          {
-            put_request: {
-              item: {
-                "server"   => server.id,
-                "key"      => "channels",
-                "channels" => server.channels.map { |c| c.id } << channel.id
-              }
-            }
-          },
-          {
-            put_request: {
-              item: {
-                "server"  => server.id,
-                "key"     => channel.id,
-                "channel" => channel.db_h
-              }
-            }
+    backoff(:batch_write_item, [
+      {
+        put_request: {
+          item: {
+            "server"   => server.id,
+            "key"      => "channels",
+            "channels" => server.channels.map { |c| c.id } << channel.id
           }
-        ]
+        }
+      },
+      {
+        put_request: {
+          item: {
+            "server"  => server.id,
+            "key"     => channel.id,
+            "channel" => channel.db_h
+          }
+        }
       }
-    })
-
-    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+    ])
   end
 
   # Update channel data
   # @param [String] server
   # @param [Array<Server::Channel>] channels
   def update_channels(server, channels)
-    response = @db.batch_write_item({
-      request_items: {
-        table_name => channels.map do |ch|
+    channels.each_slice(25) do |slice|
+      backoff(:batch_write_item, slice.map do |ch|
           {
             put_request: {
               item: {
@@ -192,43 +199,33 @@ class Database
               }
             }
           }
-        end
-      }
-    })
-
-    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+      end)
+    end
   end
 
   # Remove a channel
   # @param [Server] server
   # @param [Server::Channel] channel
-  # @return [nil, Hash]
   def delete_channel(server, channel)
-    response = @db.batch_write_item({
-      request_items: {
-        table_name => [
-          {
-            delete_request: {
-              key: {
-                "server" => server.id,
-                "key"    => channel.id
-              }
-            }
-          },
-          {
-            put_request: {
-              item: {
-                "server"   => server.id,
-                "key"      => "channels",
-                "channels" => server.channels.select { |c| c.id != channel.id }.map { |c| c.id }
-              }
-            }
+    backoff(:batch_write_item, [
+      {
+        delete_request: {
+          key: {
+            "server" => server.id,
+            "key"    => channel.id
           }
-        ]
+        }
+      },
+      {
+        put_request: {
+          item: {
+            "server"   => server.id,
+            "key"      => "channels",
+            "channels" => server.channels.select { |c| c.id != channel.id }.map { |c| c.id }
+          }
+        }
       }
-    })
-
-    response.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : response.to_h
+    ])
   end
 
 
@@ -281,16 +278,7 @@ class Database
       end
     end
 
-    responses = []
-    requests.each_slice(25) do |slice|
-      responses << @db.batch_write_item({
-        request_items: {
-          table_name => slice
-        }
-      })
-    end
-
-    responses.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : responses
+    requests.each_slice(25) { |slice| backoff(:batch_write_item, slice) }
   end
 
   ##
@@ -325,18 +313,7 @@ class Database
       requests.push(*req)
     end
 
-    responses = []
-    # Limit to 25 items at a time
-    requests.each_slice(25) do |slice|
-      responses << @db.batch_write_item({
-        request_items: {
-          table_name => slice
-        }
-      }).to_h
-    end
-
-    # Count the number of unprocessed items
-    responses.inject(0) { |r, v| r + v[:unprocessed_items].size } == 0 ? nil : responses
+    requests.each_slice(25) { |slice| backoff(:batch_write_item, slice) }
   end
 
   ##

@@ -64,6 +64,12 @@ class Accord
     # @type [Hash{String => Server}]
     @servers = {}
 
+    # Don't spam console
+    Discordrb::API::trace = false
+
+    # Do log errors
+    Discordrb::LOGGER.instance_variable_set(:@enabled_modes, %i[ error ])
+
     @accord = Discordrb::Commands::CommandBot.new(token: token, prefix: prefix)
 
     @accord.server_create(&method(:server_create))
@@ -80,6 +86,7 @@ class Accord
     @accord.command(:remove, { min_args: 1, max_args: 1 }, &method(:remove))
     @accord.command(:refresh, { max_args: 0 }, &method(:refresh))
     @accord.command(:describe, { max_args: 1 }, &method(:describe))
+    @accord.command(:prune, { min_args: 1, max_args: 1, arg_types: [ Integer ] }, &method(:prune))
 
     @accord.ready(&method(:ready))
   end
@@ -132,9 +139,8 @@ class Accord
       wake = start + 3600
 
       # @type [Server] server
-      @servers.each do |id, server|
-        logger.info("Refreshing #{server.server.name} (#{id})")
-        changed = server.refresh(@user)
+      @servers.each do |_, server|
+        server.refresh(@user)
       end
 
       while Time.now < wake
@@ -150,8 +156,7 @@ class Accord
         unless @refresh.empty?
           # @type [String] id
           @refresh.each do |id|
-            logger.info("Refreshing #{@servers[id].server.name} (#{id})")
-            changed = @servers[id].refresh(@user)
+            @servers[id].refresh(@user)
           end
 
           @refresh.clear
@@ -241,6 +246,7 @@ class Accord
     channel = @accord.parse_mention(channel) unless channel.class == Discordrb::Channel
     return "Channel not found" if channel == nil
     return "Tag count cannot exceed 11" if tags.size > 11
+    return "Channel must be a text channel" unless channel.type == Discordrb::Channel::TYPES[:text]
     return "Channel must be tagged as NSFW" unless channel.nsfw?
 
     # @type c [Server::Channel]
@@ -257,11 +263,7 @@ class Accord
 
     this_channel = Server::Channel.new(id: channel.id.to_s, tags: tags, latest: start, channel: channel)
 
-    if (responses = db.add_channel(server, this_channel))
-      logger.warn("Failed to add channel #{this_channel.id} to server #{server.id}")
-      logger.warn(responses)
-      return "Recording error."
-    end
+    db.add_channel(server, this_channel)
 
     server.channels << this_channel
 
@@ -346,6 +348,19 @@ class Accord
     @recording_thread.run
 
     "Refreshing recordings now"
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  # @param [Integer] count
+  def prune(event, count)
+    # @type [Server]
+    server = @servers[event.server.id.to_s]
+    return "No permissions" unless event.author.owner?
+
+    return "Invalid number of messsages" unless count > 0
+
+    event.channel.prune(count)
+    nil
   end
 
   # First-time setup stuff

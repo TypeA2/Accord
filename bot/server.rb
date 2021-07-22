@@ -9,7 +9,7 @@ class Server
     attr_reader :tags
 
     # @return [Integer] Last post ID in this channel
-    attr_reader :latest
+    attr_accessor :latest
 
     # @return [Discordrb::Channel] Channel instance this object belongs to
     attr_reader :channel
@@ -73,8 +73,9 @@ class Server
 
   # Refresh this server's channels
   # @param [Danbooru::User] user
-  # @return [Array<Channel>] Channels to update in the database
   def refresh(user)
+    Accord.logger.info("Refreshing #{@server.name} (#{@id}")
+
     changed = []
     @channels.each do |ch|
       count = Danbooru.post_count(user, ch.prepare_tags)
@@ -92,9 +93,10 @@ class Server
 
         new_max = posts.map { |p| p.id }.max
 
-        #Accord.logger.debug posts
-        Accord.logger.debug ch.channel
-        Accord.logger.debug posts.size
+        posts.each do |post|
+          ch.channel.send_message("`[#{post.created_at}]` https://danbooru.donmai.us/posts/#{post.id}")
+        end
+
         Accord.logger.debug "Last: #{new_max}"
 
         ch.latest = new_max
@@ -103,7 +105,7 @@ class Server
       end
     end
 
-    changed
+    Accord.db.update_channels(@id, changed)
   end
 
   # Whether the user has bot permissions in this server
