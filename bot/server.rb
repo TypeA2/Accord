@@ -91,7 +91,10 @@ class Server
           posts += Danbooru.posts(user, i, ch.prepare_tags)
         end
 
-        new_max = posts.map { |p| p.id }.max
+        # @type post [Danbooru::Post]
+        posts.sort_by! { |post| post.created_at }
+
+        new_max = posts.last
 
         posts.each do |post|
           ch.channel.send_message("`[#{post.created_at}]` https://danbooru.donmai.us/posts/#{post.id}")
