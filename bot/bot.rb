@@ -25,11 +25,14 @@ end
 user = Danbooru::User.new(login: ENV["DANBOORU_USERNAME"], key: ENV["DANBOORU_API_KEY"])
 accord = Accord.new(token: ENV["DISCORD_TOKEN"], prefix: "a!", user: user)
 
-# Handle SIGINT for shutdown
-trap("INT") do
+def shutdown(accord)
   puts "Caught interrupt, shutting down"
   accord.stop
   exit(0)
 end
+
+# Handle SIGINT and SIGTERM for shutdown
+trap("INT", proc { shutdown accord })
+trap("TERM", proc { shutdown accord })
 
 accord.run

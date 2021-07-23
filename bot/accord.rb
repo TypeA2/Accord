@@ -389,12 +389,12 @@ class Accord
     # Servers stored but not joined by the bot
     servers_to_remove = []
     @servers.each do |id, _|
-      unless @accord.servers.include?(id.to_i)
+      unless @accord.servers.key?(id.to_i)
         servers_to_remove << id
       end
     end
 
-    logger.debug("Storing #{servers_to_add} and removing #{servers_to_remove}")
+    logger.debug("Adding #{servers_to_add} to and removing #{servers_to_remove} from database")
 
     if (responses = db.delete_servers(servers_to_remove))
       logger.error("Not all servers were deleted: #{responses}")
