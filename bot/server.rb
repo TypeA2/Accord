@@ -97,7 +97,7 @@ class Server
         new_max = posts.last
 
         posts.each do |post|
-          ch.channel.send_message("`[#{post.created_at}]` https://danbooru.donmai.us/posts/#{post.id}")
+          ch.channel.send_message("`[#{post.created_at}]`\nhttps://danbooru.donmai.us/posts/#{post.id}")
         end
 
         Accord.logger.debug "Last: #{new_max}"

@@ -82,7 +82,7 @@ module Danbooru
       limit: PAGE_SIZE
     }))
 
-    JSON.parse(Net::HTTP.get(uri)).map { |p| Post.new(p["id"], Time.parse(p["created_at"])) }
+    JSON.parse(Net::HTTP.get(uri)).map { |p| Post.new(p["id"], Time.parse(p["created_at"]).utc) }
   rescue JSON::ParserError => e
     Accord.logger.warn("JSON parsing error in Danbooru::posts, Danbooru may be down: #{e.to_s}")
     []
