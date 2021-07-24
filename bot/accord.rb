@@ -312,7 +312,15 @@ class Accord
       response += " - #{channel.describe}\n"
     end
 
-    event.channel.split_send(response)
+    chunks = Discordrb.split_message(response)
+
+    chunks.each_index do |i|
+      if i > 0 && chunks[i].start_with?(" ")
+        event.channel.send_message(" " + chunks[i])
+      else
+        event.channel.send_message(chunks[i])
+      end
+    end
   end
 
   # @param [Discordrb::CommandEvent] event
