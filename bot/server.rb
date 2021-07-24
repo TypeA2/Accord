@@ -76,37 +76,36 @@ class Server
   def refresh(user)
     Accord.logger.info("Refreshing #{@server.name} (#{@id}")
 
-    changed = []
     @channels.each do |ch|
       count = Danbooru.post_count(user, ch.prepare_tags)
 
       Accord.logger.debug("Got #{count} post#{count == 1 ? "" : "s"} for tags #{ch.prepare_tags.join("+")}")
       if count > 0
-        pages = (count / Danbooru::PAGE_SIZE).ceil
+        begin
+          pages = (count / Danbooru::PAGE_SIZE).ceil
 
-        # @type [Array<Danbooru::Post>]
-        posts = []
+          # @type [Array<Danbooru::Post>]
+          posts = []
 
-        (1..pages).each do |i|
-          posts += Danbooru.posts(user, i, ch.prepare_tags)
+          (1..pages).each do |i|
+            posts += Danbooru.posts(user, i, ch.prepare_tags)
+          end
+
+          # @type post [Danbooru::Post]
+          posts.sort_by! { |post| post.created_at }
+
+          posts.each do |post|
+            ch.channel.send_message("`[#{post.created_at}]`\nhttps://danbooru.donmai.us/posts/#{post.id}")
+            ch.latest = post.id
+          end
+  
+          Accord.logger.debug "Last: #{ch.latest}"
+        ensure
+          Accord.db.update_channels(@id, [ ch ])
         end
-
-        # @type post [Danbooru::Post]
-        posts.sort_by! { |post| post.created_at }
-
-        changed << ch
-
-        posts.each do |post|
-          ch.channel.send_message("`[#{post.created_at}]`\nhttps://danbooru.donmai.us/posts/#{post.id}")
-          ch.latest = post.id
-        end
-
-        Accord.logger.debug "Last: #{ch.latest}"
       end
     end
 
-  ensure
-    Accord.db.update_channels(@id, changed)
   end
 
   # Sort all channels
