@@ -111,6 +111,11 @@ class Server
     Accord.db.update_channels(@id, changed)
   end
 
+  # Sort all channels
+  def sort
+    @channels.sort_by! { |ch| ch.channel.name }
+  end
+
   # Whether the user has bot permissions in this server
   # @param [Discordrb::Member]
   def allowed?(user)

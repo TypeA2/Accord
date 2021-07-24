@@ -266,6 +266,7 @@ class Accord
     db.add_channel(server, this_channel)
 
     server.channels << this_channel
+    server.sort
 
     "Recording complete."
   end
@@ -410,7 +411,10 @@ class Accord
     @recording_thread = Thread.new(&method(:recording_updater))
 
     logger.info("Current servers:")
-    @servers.each { |_, s| logger.info("  #{s.server.name}: #{s}") }
+    @servers.each do |_, s|
+      s.sort
+      logger.info("  #{s.server.name}: #{s}")
+    end
   end
 
   ##
