@@ -309,18 +309,10 @@ class Accord
 
     response = "#{server.channels.size} recording#{server.channels.size == 1 ? "" : "s"}:\n"
     server.channels.each do |channel|
-      response += " - #{channel.describe}\n"
+      response += "- #{channel.describe}\n"
     end
 
-    chunks = Discordrb.split_message(response)
-
-    chunks.each_index do |i|
-      if i > 0 && chunks[i].start_with?(" ")
-        event.channel.send_message(" " + chunks[i])
-      else
-        event.channel.send_message(chunks[i])
-      end
-    end
+    event.channel.split_send(response)
   end
 
   # @param [Discordrb::CommandEvent] event
