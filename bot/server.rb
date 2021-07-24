@@ -94,20 +94,18 @@ class Server
         # @type post [Danbooru::Post]
         posts.sort_by! { |post| post.created_at }
 
-        new_max = posts.last.id
+        changed << ch
 
         posts.each do |post|
           ch.channel.send_message("`[#{post.created_at}]`\nhttps://danbooru.donmai.us/posts/#{post.id}")
+          ch.latest = post.id
         end
 
-        Accord.logger.debug "Last: #{new_max}"
-
-        ch.latest = new_max
-
-        changed << ch
+        Accord.logger.debug "Last: #{ch.latest}"
       end
     end
 
+  ensure
     Accord.db.update_channels(@id, changed)
   end
 

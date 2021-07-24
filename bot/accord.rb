@@ -87,6 +87,9 @@ class Accord
     @accord.command(:refresh, { max_args: 0 }, &method(:refresh))
     @accord.command(:describe, { max_args: 1 }, &method(:describe))
     @accord.command(:prune, { min_args: 1, max_args: 1, arg_types: [ Integer ] }, &method(:prune))
+    @accord.command(:recover, { max_args: 0 }, &method(:recover))
+    @accord.command(:recover!, { max_args: 0 }, &method(:recover!))
+    @accord.command(:recording?, { max_args: 0 }, &method(:recording))
 
     @accord.ready(&method(:ready))
   end
@@ -133,7 +136,17 @@ class Accord
     logger.debug("Stopping branch thread")
   end
 
+  # @return [String]
+  def current_branch
+    "EID_#{@major}#{@minor}#{@micro}0"
+  end
+
+  # @type [Boolean]
+  @recording_running = false
+
   def recording_updater
+    @recording_running = true
+
     loop do
       start = Time.now
       wake = start + 3600
@@ -168,13 +181,17 @@ class Accord
     end
 
     logger.debug("Stopping recording thread")
+  rescue StandardError => _
+    logger.debug("Recording thread errored")
+  ensure
+    @recording_running = false
   end
 
   public
   # Simple ping/pong for testing
   # @param [Discordrb::CommandEvent] event
   def branch(event)
-    event.respond("EID_#{@major}#{@minor}#{@micro}0")
+    event.respond(current_branch)
   end
 
   # Register a role to be allowed to control the bot
@@ -362,6 +379,31 @@ class Accord
 
     event.channel.prune(count)
     nil
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  def recover(event)
+    return unless event.author.id == 114071480526045191 # My ID
+
+    # Don't restart if still alive
+    @timer = Thread.new(&method(:recording_updater)) unless @recording_running
+    nil
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  def recover!(event)
+    return unless event.author.id == 114071480526045191 # My ID
+
+    # Don't restart if still alive
+    @timer = Thread.new(&method(:recording_updater))
+    nil
+  end
+
+  # @param [Discordrb::CommandEvent] event
+  def recording(event)
+    return unless event.author.id == 114071480526045191 # My ID
+
+    event.respond((@recording_running ? "Still Recording" : "Recording has stopped") + " (#{current_branch})")
   end
 
   # First-time setup stuff
