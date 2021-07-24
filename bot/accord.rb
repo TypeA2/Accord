@@ -312,7 +312,7 @@ class Accord
       response += " - #{channel.describe}\n"
     end
 
-    response
+    event.channel.split_send(response)
   end
 
   # @param [Discordrb::CommandEvent] event
