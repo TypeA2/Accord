@@ -1,9 +1,53 @@
 require "logger/colors"
 require "discordrb"
 
-require_relative "danbooru"
+require_relative "database"
+require_relative "command"
+
+class Discordrb::Events::ApplicationCommandEvent
+  def symbol_options
+    options.transform_keys(&:to_sym)
+  end
+end
 
 class Accord
+  # @type [Integer]
+  EMBED_COLOR = 0xCD8FCE.freeze
+
+  # @type [Hash]
+  EMBED_BASE = {
+    type: "rich",
+    color: EMBED_COLOR,
+  }.freeze
+
+  # @type [Array<Command>]
+  COMMANDS = [
+    Command.new(
+      name:        :branch,
+      read_only:   true,
+      description: "Get the current branch (ping/pong)"
+    ),
+    Command.new(
+      name:        :allow,
+      read_only:   false,
+      description: "Allow a user to control the bot"
+    ) do |cmd|
+      cmd.user(:new_admin, "User to give admin permissions to", required: true)
+    end,
+    Command.new(
+      name:        :disallow,
+      read_only:   false,
+      description: "Remove a user's ability to control the bot"
+    ) do |cmd|
+      cmd.user(:admin, "User to remove admin permissions from", required: true)
+    end,
+    Command.new(
+      name:        :admins,
+      read_only:   true,
+      description: "Retrieve a list of all admins"
+    )
+  ].freeze
+
   # @return [Logger] Global logger instance
   def self.logger
     @logger ||= Logger.new(STDERR)
@@ -14,95 +58,37 @@ class Accord
     Accord.logger
   end
 
-  # @return [Database] Global database instance
-  def self.db
-    db ||= Database.new(Aws::DynamoDB::Client.new)
-  end
+  # @return [Bool]
+  attr_reader :running
 
-  # @return [Database] Global database instance
-  def db
-    Accord.db
-  end
-
-  # @param [String] token Discord token for the bot
-  # @param [String] prefix Command prefix
-  # @param [Danbooru::User] user Danbooru user to connect to the API with
-  def initialize(token:, prefix:, user:)
-    # @type [Danbooru::User]
+  # @param [String] token Discord bot token
+  # @param [Danbooru::User] user Danbooru user to connect with
+  # @param [Database] db Database instance to use
+  def initialize(token:, user:, db:, debug: false)
     @user = user
-    # @type [Boolean]
+    @db = db
+    @debug = debug
+
+    # @type [Hash{Integer => Server}]
+    @servers = {}
+
+    # @type [Bool]
     @running = false
 
     @major = rand(1..4)
     @minor = 0
     @micro = 1
 
-    # @type [Thread]
-    @timer
-
-    # @type [Thread]
-    @recording_thread
-
-    # All servers in which to refresh
-    # @type [Array<String>]
-    @refresh = []
-
-    # Automatically create table in debug mode, require manual creation in release mode
-    if db.table_exists?
-      logger.info("Table found, proceeding")
-    else
-      if ENV["DEBUG"]
-        logger.warn("Creating new table")
-
-        db.create_table
-      else
-        logger.fatal("Expected database does not exist, create it and run again")
-        exit
-      end
-    end
-
-    # @type [Hash{String => Server}]
-    @servers = {}
-
-    # Don't spam console
+    # Prevent console spam
     Discordrb::API::trace = false
 
-    # Do log errors
+    # But don't eat errors
     Discordrb::LOGGER.instance_variable_set(:@enabled_modes, %i[ error ])
 
-    @accord = Discordrb::Commands::CommandBot.new(token: token, prefix: prefix)
+    # @type [Discordrb::Bot]
+    @bot = Discordrb::Bot.new(token: token)
 
-    @accord.server_create(&method(:server_create))
-    @accord.command(:branch, { max_args: 0 }, &method(:branch))
-    @accord.command(:allow, {
-      min_args: 1,
-      max_args: 1,
-      arg_types: [ Discordrb::Role ]
-    }, &method(:allow))
-    @accord.command(:allowed, { max_args: 0 }, &method(:allowed))
-    @accord.command(:record, { min_args: 2, max_args: 12 }, &method(:record))
-    @accord.command(:record2, { min_args: 3, max_args: 13 }, &method(:record2))
-    @accord.command(:recordings, { max_args: 0 }, &method(:recordings))
-    @accord.command(:remove, { min_args: 1, max_args: 1 }, &method(:remove))
-    @accord.command(:refresh, { max_args: 0 }, &method(:refresh))
-    @accord.command(:describe, { max_args: 1 }, &method(:describe))
-    @accord.command(:prune, { min_args: 1, max_args: 1, arg_types: [ Integer ] }, &method(:prune))
-    @accord.command(:recover, { max_args: 0 }, &method(:recover))
-    @accord.command(:recover!, { max_args: 0 }, &method(:recover!))
-    @accord.command(:recording?, { max_args: 0 }, &method(:recording))
-
-    @accord.ready(&method(:ready))
-  end
-
-  ##
-  # @param [Discordrb::Events::ServerCreateEvent] event
-  def server_create(event)
-    server = event.server
-    if (responses = db.add_servers([server.id]))
-      logger.error("Failed to join server with id #{server.id} (\"#{server.name}\")")
-    else
-      @servers[server.id.to_s] = Server.new(id: server.id.to_s, roles: [], channels: [], server: server)
-    end
+    @bot.ready(&method(:ready))
   end
 
   private
@@ -133,7 +119,7 @@ class Accord
       sleep(rand(25...95))
     end
 
-    logger.debug("Stopping branch thread")
+    logger.debug("Stopping branch thread") if @debug
   end
 
   # @return [String]
@@ -141,351 +127,216 @@ class Accord
     "EID_#{@major}#{@minor}#{@micro}0"
   end
 
-  # @type [Boolean]
-  @recording_running = false
-
-  def recording_updater
-    @recording_running = true
-
-    loop do
-      start = Time.now
-      wake = start + 3600
-
-      # @type [Server] server
-      @servers.each do |_, server|
-        server.refresh(@user)
-      end
-
-      while Time.now < wake
-        sleep_now = [3600, wake - Time.now].min.clamp(0..)
-
-        logger.debug("Sleeping for #{sleep_now} seconds until #{wake}")
-
-        sleep(sleep_now)
-
-        break unless @running
-
-        # Refresh posts if there's a manual refresh
-        unless @refresh.empty?
-          # @type [String] id
-          @refresh.each do |id|
-            @servers[id].refresh(@user)
-          end
-
-          @refresh.clear
-          next
-        end
-
-        break unless @running
-      end
-    end
-
-    logger.debug("Stopping recording thread")
-  rescue StandardError => _
-    logger.debug("Recording thread errored")
-  ensure
-    @recording_running = false
-  end
-
-  public
-  # Simple ping/pong for testing
-  # @param [Discordrb::CommandEvent] event
-  def branch(event)
-    event.respond(current_branch)
-  end
-
-  # Register a role to be allowed to control the bot
-  # @param [Discordrb::CommandEvent] event
-  # @param [Discordrb::Role] role
-  def allow(event, role)
-    # Require owner
-    return unless event.author.owner?
-
-    # Require a role
-    return unless role.class == Discordrb::Role
-
-    server = @servers[event.server.id.to_s]
-    role_id = role.id.to_s
-
-    if server.roles.include?(role_id)
-      event.send_message("Role already allowed")
-      return
-    end
-
-    logger.info("Adding role @#{role.name} (#{role.id})")
-
-    server.roles << role_id
-
-    db.set_roles(server)
-
-    event.send_message("Role <@&#{role.id}> added", false, nil, nil, { parse: [] })
-  end
-
-  # List all allowed roles for this server
-  # @param [Discordrb::CommandEvent] event
-  def allowed(event)
-    server = @servers[event.server.id.to_s]
-    return unless server.allowed?(event.author)
-
-    if server.roles.empty?
-      event.send_message("No roles registered for this server")
-      return
-    end
-
-    msg = "Allowed roles for this server:\n"
-
-    server.roles.each do |role|
-      msg += "  - <@&#{role}>"
-    end
-
-    event.send_message(msg, false, nil, nil, { parse: [] })
-  end
-
-  # Register a channel
-  # @param [Discordrb::CommandEvent] event
-  # @param [Discordrb::Channel, String] channel
-  # @param [Array<String>] tags
-  def record(event, channel, *tags)
-    record2(event, channel, 0, *tags)
-  end
-
-  # Register a channel, starting at a specific post ID
-  # @param [Discordrb::CommandEvent] event
-  # @param [Discordrb::Channel, String] channel
-  # @param [Integer] start
-  # @param [Array<String>] tags
-  def record2(event, channel, start, *tags)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless server.allowed?(event.author)
-
-    # @type [Discordrb::Channel]
-    channel = @accord.parse_mention(channel) unless channel.class == Discordrb::Channel
-    return "Channel not found" if channel == nil
-    return "Tag count cannot exceed 11" if tags.size > 11
-    return "Channel must be a text channel" unless channel.type == Discordrb::Channel::TYPES[:text]
-    return "Channel must be tagged as NSFW" unless channel.nsfw?
-
-    # @type c [Server::Channel]
-    # @type found [Server::Channel]
-    if (found = server.channels.find { |c| c.id == channel.id.to_s })
-      return "Channel already registered: #{found.describe}"
-    end
-
-    # Remove inline code delimiters
-    tags = tags.map { |t| t.gsub("`", "") }
-
-    logger.info(
-      "Recording channel #{channel.name} with tags `#{tags.join(" ")}`, starting at post #{start}")
-
-    this_channel = Server::Channel.new(id: channel.id.to_s, tags: tags, latest: start, channel: channel)
-
-    db.add_channel(server, this_channel)
-
-    server.channels << this_channel
-    server.sort
-
-    "Recording complete."
-  end
-
-  # Remove a channel's recording
-  # @param [Discordrb::CommandEvent] event
-  # @param [Discordrb::Channel, String] channel
-  def remove(event, channel)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless server.allowed?(event.author)
-
-    # @type [Discordrb::Channel]
-    channel = @accord.parse_mention(channel) unless channel.class == Discordrb::Channel
-    return "Channel not found" if channel == nil
-
-    # @type [Server::Channel]
-    found = server.channels.find { |c| c.id == channel.id.to_s }
-    return "Recording not present" unless found
-
-    if (responses = db.delete_channel(server, found))
-      logger.warn("Failed to delete channel #{found.id} of server #{server.id}")
-      logger.warn(responses)
-      return "Removal error."
-    end
-
-    server.channels.delete(found)
-
-    logger.info("Removed #{found.describe}")
-
-    "Removal of recording for #{found.describe} complete"
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  def recordings(event)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless server.allowed?(event.author)
-
-    return "No recordings" if server.channels.empty?
-
-    response = "#{server.channels.size} recording#{server.channels.size == 1 ? "" : "s"}:\n"
-    server.channels.each do |channel|
-      response += "- #{channel.describe}\n"
-    end
-
-    event.channel.split_send(response)
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  # @param [String, Discordrb::Channel] channel
-  def describe(event, channel = event.channel)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless server.allowed?(event.author)
-
-    if channel.class == String
-      # Channel argument given, parse
-      channel = @accord.parse_mention(channel)
-      return "Channel not found" if channel == nil
-    end
-    # Else current channel
-
-
-    # @type [Server::Channel] found
-    if (found = server.channels.find { |ch| ch.id == channel.id.to_s })
-      "Recording: #{found.describe}"
-    else
-      "No recording for #{(event.channel.id == channel.id) ? "this channel" : "<##{channel.id}>"}."
-    end
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  def refresh(event)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless server.allowed?(event.author)
-
-    @refresh << server.id
-    @recording_thread.run
-
-    "Refreshing recordings now"
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  # @param [Integer] count
-  def prune(event, count)
-    # @type [Server]
-    server = @servers[event.server.id.to_s]
-    return "No permissions" unless event.author.owner?
-
-    return "Invalid number of messsages" unless count > 0
-
-    event.channel.prune(count)
-    nil
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  def recover(event)
-    return unless event.author.id == 114071480526045191 # My ID
-
-    # Don't restart if still alive
-    @timer = Thread.new(&method(:recording_updater)) unless @recording_running
-    nil
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  def recover!(event)
-    return unless event.author.id == 114071480526045191 # My ID
-
-    # Don't restart if still alive
-    @timer = Thread.new(&method(:recording_updater))
-    nil
-  end
-
-  # @param [Discordrb::CommandEvent] event
-  def recording(event)
-    return unless event.author.id == 114071480526045191 # My ID
-
-    event.respond((@recording_running ? "Still Recording" : "Recording has stopped") + " (#{current_branch})")
-  end
-
-  # First-time setup stuff
+  # Bot is connected, perform setup
   def ready(_)
-    @running = true
+    # @type [Set<Integer>]
+    stored_servers = @db.servers
 
-    server_mapping = db.servers
-
-    # Servers the bot is in but not stored
-    servers_to_add = []
-    @accord.servers.each do |id, server|
-      if !server_mapping.key?(id.to_s)
-        servers_to_add << id.to_s
-        @servers[id.to_s] = Server.new(id: id.to_s, roles: [], channels: [], server: server)
+    # May need to add some servers to the db
+    @bot.servers.each do |id, server|
+      if stored_servers.include?(id)
+        # Already exists
+        @servers[id] = Server.new(
+          id:       id,
+          admins:   @db.admins(server),
+          channels: @db.channels(server),
+          server:   server)
       else
-        # Server already in database
-        # @type [Hash{Symbol => Array<String>}]
-        data = server_mapping[id.to_s]
-
-        @servers[id.to_s] = Server.new(id: id.to_s, roles: data[:control_roles],
-          channels: db.channels(server, data[:channels]), server: server)
-      end
-
-    end
-
-    # Servers stored but not joined by the bot
-    servers_to_remove = []
-    @servers.each do |id, _|
-      unless @accord.servers.key?(id.to_i)
-        servers_to_remove << id
+        # New server
+        @db.add_server(id)
+        @servers[id] = Server.new(id: id, admins: Set.new, channels: [], server: server)
       end
     end
 
-    logger.debug("Adding #{servers_to_add} to and removing #{servers_to_remove} from database")
-
-    if (responses = db.delete_servers(servers_to_remove))
-      logger.error("Not all servers were deleted: #{responses}")
-      raise "Failed to delete all servers"
+    # Remove any servers we're not in anymore
+    stored_servers.each do |id|
+      unless @servers.key?(id)
+        @db.del_server(id)
+      end
     end
 
-    if (responses = db.add_servers(servers_to_add))
-      # Not all servers were added
-      logger.error("Not all servers were added: #{responses}")
-      raise "Failed to add all new servers"
-    end
-
-    @recording_thread = Thread.new(&method(:recording_updater))
-
-    logger.info("Current servers:")
+    logger.info("Servers: ")
     @servers.each do |_, s|
       s.sort
       logger.info("  #{s.server.name}: #{s}")
+
+      if @debug
+        s.channels.each do |ch|
+          logger.info("    #{ch.id}: >= #{ch.latest}, #{tags.join("+")}")
+        end
+      end
+    end
+
+    if @debug
+      # Check all methods exist
+      begin
+        COMMANDS.each { |cmd| method(cmd.name) }
+      rescue NameError => e
+        @bot.log_exception(e)
+        $wait_queue.push(nil)
+        return
+      end
+
+      logger.debug("Registering application commands for each server separately...")
+
+      start = Time.now
+      @servers.each_value do |server|
+        logger.debug("  #{server.id}...")
+        # Ensure the method exists
+        COMMANDS.each { |cmd| cmd.register(self, @bot, server:) }
+      end
+
+      logger.debug("Done (#{Time.now - start} s)")
+    else
+      
     end
   end
 
   ##
+  # Convenience method to create an array with a single embed
+  # @return [Array<Hash>]
+  def embed(**args)
+    [EMBED_BASE.merge(args)]
+  end
+
+  ##
+  # Ping/pong
+  # @param [Discordrb::ApplicationCommandEvent]
+  def branch(event)
+    event.respond(embeds: embed(title: "Current branch", description: current_branch))
+  end
+
+  ##
+  # Add an admin
+  # @param [Discordrb::ApplicationCommandEvent]
+  def allow(event)
+    server = @servers[event.server_id]
+    user = server.member(event.symbol_options[:new_admin].to_i)
+
+    # Still need some input checking
+    if user == server.bot
+      event.respond(embeds: embed(description: "That's me!"))
+    elsif server.admins.include?(user.id)
+      event.respond(embeds: embed(description: "<@#{user.id}> is already an admin"))
+    else
+      # Add if user is not already in the list
+      logger.info("Adding #{user.id} as admin in #{server.id}")
+
+      server.admins << user.id
+      @db.add_admin(server_id: server.id, admin_id: user.id)
+
+      event.respond(embeds: embed(description: "<@#{user.id}> is being added to the admins..."))
+      
+      COMMANDS.each do |cmd|
+        unless cmd.read_only
+          @bot.edit_application_command_permissions(cmd.id, server.id) do |perms|
+            server.admins.union([server.owner.id]).each { |id| perms.allow_user(id) }
+          end
+        end
+      end
+
+      event.edit_response(embeds: embed(description: "<@#{user.id}> was added as an admin"))
+    end
+  end
+
+  ##
+  # Remove an admin
+  # @param [Discordrb::ApplicationCommandEvent]
+  def disallow(event)
+    server = @servers[event.server_id]
+    user = server.member(event.symbol_options[:admin].to_i)
+
+    if user == server.bot
+      event.respond(embeds: embed(description: "That's me!"))
+    elsif !server.admins.include?(user.id)
+      event.respond(embeds: embed(description: "<@#{user.id}> is not an admin"))
+    else
+      logger.info("Removing #{user.id} as admin in #{server.id}")
+
+      server.admins.delete(user.id)
+      @db.del_admin(server_id: server.id, admin_id: user.id)
+
+      event.respond(embeds: embed(description: "<@#{user.id}> is being removed from the admins..."))
+
+      COMMANDS.each do |cmd|
+        unless cmd.read_only
+          @bot.edit_application_command_permissions(cmd.id, server.id) do |perms|
+            server.admins.union([server.owner.id]).each { |id| perms.allow_user(id) }
+          end
+        end
+      end
+
+      event.edit_response(embeds: embed(description: "<@#{user.id}> is no longer an admin"))
+      
+    end
+  end
+
+  ##
+  # List all admins
+  # @param [Discordrb::ApplicationCommandEvent]
+  def admins(event)
+    server = @servers[event.server_id]
+
+    event.respond(embeds: embed(title: "Admin list of `#{server.name}`", fields: server.admins.map do |id|
+      { name: "\u200B", value: " - <@#{id}>" }
+    end))
+  end
+
+  public
+  ##
   # Start the bot
   def run
     @running = true
-
     @timer = Thread.new(&method(:branch_updater))
 
-    @accord.run
+    @bot.run(true)
   end
 
   ##
   # Stop the bot
   def stop
-    @accord.stop
+    if @debug
+      logger.debug("Unregistering commands...")
+
+      start = Time.now
+      @servers.each_key do |server_id|
+        logger.debug("  #{server_id}...")
+        @bot.get_application_commands(server_id:).map!(&:delete)
+      end
+
+      logger.debug("Done (#{Time.now - start} s)")
+    end
+
+    @bot.stop
 
     @running = false
-
+    # Interrupt sleep
     @timer.run if @timer.alive?
     @timer.join
 
-    @recording_thread.run if @recording_thread.alive?
-    @recording_thread.join
-
-    @accord.join
+    @bot.join
   end
 
-  def to_s
-    "<Accord servers=#{@servers}>"
+  ##
+  # Connect to the bot and register all global application commands
+  def register_globals
+    logger.info("Registering global application commands")
+
+    @bot.clear!
+    @bot.run(true)
+  end
+
+  ##
+  # Connect the bot, unregister global application commands and exit
+  def unregister_globals
+    logger.info("Clearing global application commands")
+
+    @bot.clear!
+    @bot.run(true)
+
+    @bot.get_application_commands.map!(&:delete)
+
+    @bot.stop
+    @bot.join
   end
 end
