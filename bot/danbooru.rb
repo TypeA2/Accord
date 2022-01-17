@@ -51,6 +51,14 @@ module Danbooru
     def inspect
       "<Post id=#{@id}, created_at=#{@created_at}>"
     end
+
+    def describe
+      inspect
+    end
+
+    def to_s
+      inspect
+    end
   end
 
   # @param [User] user
@@ -82,7 +90,9 @@ module Danbooru
       limit: PAGE_SIZE
     }))
 
-    JSON.parse(Net::HTTP.get(uri)).map { |p| Post.new(p["id"], Time.parse(p["created_at"]).utc) }
+    JSON.parse(Net::HTTP.get(uri))
+      .select { |p| p.key?("id") }
+      .map { |p| Post.new(p["id"], Time.parse(p["created_at"]).utc) }
   rescue JSON::ParserError => e
     Accord.logger.warn("JSON parsing error in Danbooru::posts, Danbooru may be down: #{e.to_s}")
     []
