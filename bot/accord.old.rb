@@ -74,21 +74,21 @@ class Accord
 
     @accord.server_create(&method(:server_create))
     #@accord.command(:branch, { max_args: 0 }, &method(:branch))
-    @accord.command(:allow, {
-      min_args: 1,
-      max_args: 1,
-      arg_types: [ Discordrb::Role ]
-    }, &method(:allow))
-    @accord.command(:allowed, { max_args: 0 }, &method(:allowed))
-    @accord.command(:record, { min_args: 2, max_args: 12 }, &method(:record))
-    @accord.command(:record2, { min_args: 3, max_args: 13 }, &method(:record2))
-    @accord.command(:recordings, { max_args: 0 }, &method(:recordings))
-    @accord.command(:remove, { min_args: 1, max_args: 1 }, &method(:remove))
+    #@accord.command(:allow, {
+    #  min_args: 1,
+    #  max_args: 1,
+    #  arg_types: [ Discordrb::Role ]
+    #}, &method(:allow))
+    #@accord.command(:allowed, { max_args: 0 }, &method(:allowed))
+    #@accord.command(:record, { min_args: 2, max_args: 12 }, &method(:record))
+    #@accord.command(:record2, { min_args: 3, max_args: 13 }, &method(:record2))
+    #@accord.command(:recordings, { max_args: 0 }, &method(:recordings))
+    #@accord.command(:remove, { min_args: 1, max_args: 1 }, &method(:remove))
     @accord.command(:refresh, { max_args: 0 }, &method(:refresh))
-    @accord.command(:describe, { max_args: 1 }, &method(:describe))
-    @accord.command(:prune, { min_args: 1, max_args: 1, arg_types: [ Integer ] }, &method(:prune))
-    @accord.command(:recover, { max_args: 0 }, &method(:recover))
-    @accord.command(:recover!, { max_args: 0 }, &method(:recover!))
+    #@accord.command(:describe, { max_args: 1 }, &method(:describe))
+    #@accord.command(:prune, { min_args: 1, max_args: 1, arg_types: [ Integer ] }, &method(:prune))
+    #@accord.command(:recover, { max_args: 0 }, &method(:recover))
+    #@accord.command(:recover!, { max_args: 0 }, &method(:recover!))
     @accord.command(:recording?, { max_args: 0 }, &method(:recording))
 
     @accord.ready(&method(:ready))

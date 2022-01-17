@@ -8,6 +8,7 @@ require_relative "channel"
 # Represents a server which the bot is in
 class Server
   extend Forwardable
+  
   # @return [Set<Integer>] ID of users in this server that can control the bot
   attr_reader :admins
 
@@ -23,8 +24,7 @@ class Server
   # @param [Set<Integer>] admins IDs of  users to listen to
   # @param [Array<Channel>] channels objects to post in
   # @param [Discordrb::Server] server Server instance
-  def initialize(id:, admins:, channels:, server:)
-    @id = id
+  def initialize(admins:, channels:, server:)
     @admins = admins
     @channels = channels
     @server = server
@@ -32,8 +32,9 @@ class Server
 
   # Refresh this server's channels
   # @param [Danbooru::User] user
-  def refresh(user)
-    Accord.logger.info("Refreshing #{@server.name} (#{@id}")
+  # @param [Database] db
+  def refresh(user, db)
+    Accord.logger.info("Refreshing #{@server.name} (#{@server.id})")
 
     @channels.each do |ch|
       count = Danbooru.post_count(user, ch.prepare_tags)
@@ -51,16 +52,25 @@ class Server
           end
 
           # @type post [Danbooru::Post]
-          posts.sort_by! { |post| post.created_at }
+          posts.sort_by! { |post| post.id }
 
           posts.each do |post|
             ch.channel.send_message("`[#{post.created_at}]`\nhttps://danbooru.donmai.us/posts/#{post.id}")
             ch.latest = post.id
+            ch.count += 1
+
+            # Light attempt at preemptive rate limiting
+            sleep 1
           end
   
           Accord.logger.debug "Last: #{ch.latest}"
         ensure
-          Accord.db.update_channels(@id, [ ch ])
+          db.update_channel(
+            channel_id:  ch.id,
+            server_id:   @server.id,
+            new_count:   ch.count,
+            latest_post: ch.latest
+          )
         end
       end
     end
